@@ -23,7 +23,7 @@ It also includes **VisionGuide**, an end-to-end voice + vision extension that le
 - [Installation](#installation)
 - [Configuration / API Keys](#configuration--api-keys)
 - [Running the Agent](#running-the-agent)
-- [One-Command Reproduction](#one-command-reproduction)
+- [Reproducing the Benchmark](#reproducing-the-benchmark)
 - [Testing](#testing)
 - [Project Structure](#project-structure)
 - [Reproducibility](#reproducibility)
@@ -314,10 +314,10 @@ This is important for any future real-world integration involving bookings, purc
 | Voice infrastructure | LiveKit Agents |
 | VAD | Silero |
 | STT | Deepgram Nova-3 |
-| LLM | OpenAI GPT-4o-mini via LiveKit Inference |
+| LLM | OpenAI GPT-4o-mini via LiveKit Inference (GPT-4o in benchmark mode) |
 | Coordination | Deterministic Python (`asyncio`), no model in the loop |
 | TTS | Cartesia Sonic-3 |
-| Noise cancellation | LiveKit Background Noise Cancellation |
+| Noise cancellation | LiveKit Background Noise Cancellation (off in benchmark mode) |
 | Turn detection | LiveKit turn detector (`inference.TurnDetector`) + preemptive generation |
 | Vision detection | Ultralytics YOLO26n (`yolo26n.pt`) |
 | Vision depth | Ultralytics YOLO26n-depth (`yolo26n-depth.pt`, metric depth map) |
@@ -518,59 +518,57 @@ On CPU the same pipeline runs at about 112 ms per frame.
 
 ### Prerequisites
 
-- Python
-- LiveKit project
-- LiveKit credentials
-- Required provider API credentials
-- Webcam if using VisionGuide
+- Python 3.10–3.12
+- [`uv`](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
+- `ffmpeg`, needed only for the benchmark (`brew install ffmpeg` / `sudo apt install ffmpeg`)
+- A [LiveKit Cloud](https://cloud.livekit.io) project. STT, LLM and TTS all run through LiveKit Inference, so no other API keys are needed. The free plan includes $2.50 of inference credit per month (see [Inference credits](#inference-credits)).
+- A webcam, only for VisionGuide
 
 ### Clone
 
 ```bash
-git clone <your-repository-url>
-cd interruptible-agent
+git clone https://github.com/retro-ayush/Project-Prism.git
+cd Project-Prism
 ```
 
 ### Install dependencies
 
-The project targets Python 3.10–3.12 and uses `uv`:
+```bash
+uv sync                               # voice agent
+uv sync --extra vision                # optional: OpenCV + Ultralytics for VisionGuide
+uv run src/agent.py download-files    # one time: VAD, turn-detector and noise-cancellation models
+```
+
+Without `uv`, install the same pinned versions (including the VisionGuide extra) with pip:
 
 ```bash
-uv sync                 # voice agent
-uv sync --extra vision  # also install OpenCV + Ultralytics for VisionGuide
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python src/agent.py download-files
 ```
+
+`requirements.txt` is generated from `uv.lock` (`uv export --format requirements-txt --no-hashes --no-dev --no-emit-project --extra vision -o requirements.txt`); regenerate it after changing dependencies.
 
 ---
 
 ## Configuration / API Keys
 
-Create:
-
-```text
-.env
+```bash
+cp .env.example .env
 ```
 
-using:
+Fill in the three values from your LiveKit project (**Settings → API Keys**) and add an empty `AGENT_NAME`:
 
 ```text
-.env.example
-```
-
-as the reference.
-
-The environment should contain the credentials required by the LiveKit and model providers used by the agent.
-
-Do **not** commit `.env` or API keys.
-
-Typical provider configuration includes:
-
-```text
-LIVEKIT_URL=...
+LIVEKIT_URL=wss://<your-project>.livekit.cloud
 LIVEKIT_API_KEY=...
 LIVEKIT_API_SECRET=...
+AGENT_NAME=
 ```
 
-STT, LLM and TTS run through LiveKit Inference, so no separate provider keys are needed.
+`AGENT_NAME=` (empty) makes the agent join every new room, which both the Agents Playground and the benchmark need. Without it the agent registers as `fdb-agent` and waits for an explicit dispatch that never comes.
+
+STT, LLM and TTS run through LiveKit Inference, so no separate provider keys are needed. Do **not** commit `.env` or API keys.
 
 Optional settings:
 
@@ -633,17 +631,153 @@ LiveKit camera is connected.
 
 ---
 
-## One-Command Reproduction
+## Reproducing the Benchmark
 
-After installing dependencies and configuring `.env`:
+The [Full-Duplex-Bench](https://github.com/DanielLin94144/Full-Duplex-Bench) v3 harness streams recorded user audio into LiveKit rooms named `eval-xxxx`. The agent joins each room, answers, and logs every tool call to `/tmp/agent_tool_calls.log`. The harness then transcribes the reply and scores tool selection, arguments, response quality and latency.
+
+**The agent and the harness must run on the same machine**, because the harness reads the agent's tool log locally.
+
+Complete [Installation](#installation) and [Configuration](#configuration--api-keys) first. All commands below start from the project root unless stated otherwise.
+
+### 1. Set up the harness (one time)
+
+The harness is cloned into `Full-Duplex-Bench/` (git-ignored, not vendored) and needs its own Python environment, because its package versions differ from the agent's:
 
 ```bash
-uv run src/agent.py dev
+git clone https://github.com/DanielLin94144/Full-Duplex-Bench.git
+cd Full-Duplex-Bench/v3
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install "livekit-agents~=1.3" "livekit[crypto]~=1.0" numpy python-dotenv \
+    pydub ffmpeg-python openai "nemo_toolkit[asr]" gdown
+
+# Benchmark data: 100 samples, ~736 MB download
+.venv/bin/gdown 1SO_4MTazWQ_jvCx0dtmpQ-t40bdd07yz -O fdb_v3_data.zip
+unzip -q fdb_v3_data.zip -x '__MACOSX/*' && rm fdb_v3_data.zip
 ```
 
-This starts the main voice-agent workflow.
+Create `Full-Duplex-Bench/v3/.env.local` with the **same** three `LIVEKIT_*` values as the project's `.env`.
 
-For the complete benchmark reproduction, clone [Full-Duplex-Bench](https://github.com/ServiceNow/Full-Duplex-Bench) into `Full-Duplex-Bench/` (it is git-ignored, not vendored) and point its v3 runner at the `fdb-agent` worker. The harness reads tool calls from `AGENT_TOOL_LOG`.
+**No NVIDIA GPU (e.g. macOS):** the harness always moves its speech-recognition model to CUDA and crashes without it. Patch it once, still inside `Full-Duplex-Bench/v3`:
+
+```bash
+.venv/bin/python - <<'EOF'
+p = "run_tool_benchmark.py"
+s = open(p).read()
+s = s.replace("    if hasattr(model, 'cuda'):",
+              "    import torch\n    if torch.cuda.is_available():")
+open(p, "w").write(s)
+print("patched")
+EOF
+```
+
+**Protect local data from the harness repo.** `Full-Duplex-Bench/` is its own git repository, so editors (e.g. VS Code's Source Control panel) list the downloaded data and results as untracked changes, and "Discard All Changes" **permanently deletes them**. Mark them as ignored inside the harness repo and hide the patch from its status:
+
+```bash
+cd Full-Duplex-Bench
+printf '%s\n' v3/fdb_v3_data_released/ v3/fdb_subset_48/ v3/runs/ 'v3/reports_*/' 'v3/*_report.json' >> .git/info/exclude
+git update-index --skip-worktree v3/run_tool_benchmark.py
+git status --short    # should print nothing
+```
+
+The first benchmark run also downloads the harness's speech-recognition model (~600 MB) and needs about 2 GB of free disk space to unpack it.
+
+### 2. Choose the sample set
+
+Run all 100 samples (`--root_dir fdb_v3_data_released`), or the **balanced 48-sample subset** used for our comparisons: 12 scenarios per domain, 16 each of easy/medium/hard, one recording per scenario. It is seeded, so every machine gets the same 48:
+
+```bash
+cd Full-Duplex-Bench/v3
+.venv/bin/python ../../scripts/make_fdb_subset.py     # creates fdb_subset_48/
+```
+
+### 3. Run
+
+Use two terminals, and make sure **no other agent** is connected to the same LiveKit project (an extra `dev`/`console` agent or a cloud deployment would take some of the rooms). To see whether an agent is running locally: `lsof -nP -iTCP:8081 -sTCP:LISTEN`.
+
+**Terminal 1: the agent** (project root):
+
+```bash
+rm -f /tmp/agent_tool_calls.log
+BENCHMARK_MODE=1 uv run src/agent.py start
+```
+
+Wait for the `registered worker` log line with your project's URL. `BENCHMARK_MODE=1` turns off the greeting, VisionGuide and noise cancellation, uses `gpt-4o`, and waits 1.5–6 s before ending a turn, so the agent hears the whole disfluent recording instead of answering the first fragment. Add `LLM_MODEL=openai/gpt-4o-mini` to use about a third of the credits.
+
+**Terminal 2: the harness** (`Full-Duplex-Bench/v3`):
+
+```bash
+.venv/bin/python run_tool_benchmark_all_released.py --provider interruptible --root_dir fdb_subset_48 --force
+```
+
+It takes about a minute per sample. Without `--force`, samples that already have a result are skipped, so an interrupted run can be resumed. Stop the agent (Ctrl-C) as soon as the run finishes; an idle agent connected to a Playground or console session keeps using credits.
+
+### 4. Check the run before scoring
+
+The harness saves a result for every sample even when the agent never heard it (credits exhausted, agent hung), so a broken run looks complete. Check it from the project root:
+
+```bash
+uv run python scripts/check_fdb_run.py Full-Duplex-Bench/v3/fdb_subset_48
+```
+
+Every sample should be `ok`. For any that aren't, fix the cause, delete their `result_interruptible.json` files and rerun step 3 **without** `--force`.
+
+### 5. Score
+
+Scoring uses GPT-4o as a judge. It can run through LiveKit Inference with the same project credentials, so no OpenAI key is needed. From `Full-Duplex-Bench/v3`:
+
+```bash
+export OPENAI_BASE_URL=https://agent-gateway.livekit.cloud/v1
+export OPENAI_API_KEY=$(cd ../.. && .venv/bin/python -c "
+from dotenv import load_dotenv; load_dotenv('.env'); import os
+from livekit.agents.inference._utils import create_access_token
+print(create_access_token(os.environ['LIVEKIT_API_KEY'], os.environ['LIVEKIT_API_SECRET'], ttl=7200))")
+
+mkdir -p reports_subset48
+.venv/bin/python evaluate_tool_calls.py --benchmark benchmark_data_v2.json --results-dir fdb_subset_48 \
+    --provider interruptible --output reports_subset48/evaluation_report.json --use-llm
+.venv/bin/python evaluate_pass_rate.py --benchmark benchmark_data_v2.json --results-dir fdb_subset_48 \
+    --provider interruptible --output reports_subset48/pass_rate_report.json --use-llm
+.venv/bin/python analyze_tool_latency.py --results-dir fdb_subset_48 --provider interruptible \
+    --output reports_subset48/latency_report.json
+```
+
+The token is valid for 2 hours. To score with your own OpenAI key instead, set only `OPENAI_API_KEY` in `.env.local`. Without `--use-llm`, the two evaluation scripts run offline for free, but they compare arguments by exact match and skip response quality.
+
+### Inference credits
+
+Benchmark runs and scoring are billed to the LiveKit project's inference credits. Estimated per sample (~47 s of audio):
+
+| Agent LLM | Per sample | 48 samples | 100 samples |
+| --- | ---: | ---: | ---: |
+| `openai/gpt-4o` (benchmark default) | ~$0.04 | ~$1.90 | ~$4.00 |
+| `openai/gpt-4o-mini` | ~$0.012 | ~$0.60 | ~$1.20 |
+
+Scoring with the GPT-4o judge adds about $0.005 per sample. On the free plan ($2.50/month), 48 samples with `gpt-4o` plus scoring just fits. When credits run out mid-run, the agent's log shows `429 Too Many Requests` and every remaining sample is silent. Step 4 detects this.
+
+### Windows
+
+The same steps work in PowerShell with these differences:
+
+- Install tools with `winget install Python.Python.3.12 Git.Git Gyan.FFmpeg` and `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`.
+- Use `py -3.12 -m venv .venv` and `.venv\Scripts\python` instead of `.venv/bin/python`. Unzip with `Expand-Archive`.
+- Set variables before the command: `$env:BENCHMARK_MODE="1"; $env:PYTHONUTF8="1"; uv run src/agent.py start`, and set `$env:PYTHONUTF8="1"` in the harness terminal too (the harness opens files without an explicit encoding).
+- Keep the project on `C:`. `/tmp/agent_tool_calls.log` resolves to `C:\tmp\agent_tool_calls.log` for both processes.
+- `make_fdb_subset.py` copies files instead of linking when symlinks aren't allowed.
+- `nemo_toolkit[asr]` is not officially supported on native Windows. If it fails to install or load, use WSL2 (Ubuntu) and follow the Linux steps.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+| --- | --- |
+| Agent never joins the benchmark rooms | `AGENT_NAME=` (empty) missing from `.env`. Restart the agent after adding it |
+| `address already in use` on port 8081 | Another agent is running: `lsof -nP -iTCP:8081 -sTCP:LISTEN`, then stop it (`kill $(lsof -tiTCP:8081 -sTCP:LISTEN)`) |
+| Most samples silent, `429` in the agent log | Inference credits exhausted. Wait for the next billing cycle, upgrade, or use another project |
+| Samples silent after a point, no `429`, agent stops logging new rooms | Agent hung. `curl -m 5 http://localhost:8081/` gets no answer. Restart the agent, delete the silent results, rerun without `--force` |
+| `Torch not compiled with CUDA enabled` | Apply the no-GPU patch in step 1 |
+| `No space left on device` while loading the ASR model | Free ~2 GB (e.g. `pip cache purge`) |
+| Data or results suddenly missing | Untracked files in the harness repo were discarded. Redownload and add the `.git/info/exclude` entries from step 1 |
+| `Missing credentials ... OPENAI_API_KEY` when scoring | Run the two `export` lines from step 5 in the same terminal |
 
 ---
 
@@ -727,7 +861,9 @@ interruptible-agent/
 │   └── alert_tone.py         # Generated two-tone alert WAV
 │
 ├── scripts/
-│   └── report.py             # Markdown session report from a trace
+│   ├── report.py             # Markdown session report from a trace
+│   ├── make_fdb_subset.py    # Seeded 48-sample Full-Duplex-Bench subset
+│   └── check_fdb_run.py      # Verify the agent heard every benchmark sample
 │
 ├── vision_guide/
 │   ├── vision.py             # Standalone local-webcam mode → scene.json
@@ -762,17 +898,12 @@ The repository keeps the main pieces needed to reproduce the project:
 - Evaluation resources
 - Demo video
 
-For a clean reproduction:
+For a clean reproduction, follow [Installation](#installation), [Configuration](#configuration--api-keys) and [Reproducing the Benchmark](#reproducing-the-benchmark) in order. What makes a run comparable to ours:
 
-```text
-1. Clone repository
-2. Install dependencies
-3. Configure .env
-4. Start LiveKit agent
-5. Run VisionGuide separately if needed
-6. Run FDB-v3 evaluation
-7. Compare results with the recorded benchmark run
-```
+- the same agent settings: `BENCHMARK_MODE=1` with its default LLM (`openai/gpt-4o`), unless you state otherwise;
+- the same samples: all 100, or the seeded 48-sample subset from `scripts/make_fdb_subset.py`;
+- the same judge: GPT-4o with `--use-llm`;
+- a run that passes `scripts/check_fdb_run.py`, so every sample was actually heard by the agent.
 
 The benchmark result reported above belongs to the tested version of the agent and may change with model/provider versions, network conditions, hardware, and configuration.
 

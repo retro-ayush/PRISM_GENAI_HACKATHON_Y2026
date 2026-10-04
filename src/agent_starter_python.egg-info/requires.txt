@@ -1,4 +1,0 @@
-livekit-agents[silero]~=1.8
-livekit-plugins-ai-coustics~=0.3
-livekit-plugins-noise-cancellation>=0.3.2
-python-dotenv

@@ -68,6 +68,23 @@ VLM_MODEL = os.getenv("VLM_MODEL", "openai/gpt-4o-mini")
 # new room automatically, e.g. when testing from the Agents Playground.
 AGENT_NAME = os.getenv("AGENT_NAME", "fdb-agent")
 
+# Full-Duplex-Bench runs: the harness streams pre-recorded, disfluent audio
+# 2 s after creating the room, so skip everything that delays joining or
+# talks over the user (greeting, VisionGuide, noise cancellation) and wait
+# longer before ending a turn on "um... like..." pauses.
+BENCHMARK_MODE = os.getenv("BENCHMARK_MODE", "0") == "1"
+LLM_MODEL = os.getenv(
+    "LLM_MODEL", "openai/gpt-4o" if BENCHMARK_MODE else "openai/gpt-4o-mini"
+)
+# Silence (s) before a turn ends when the turn detector thinks the user is
+# done (min) or still mid-sentence (max). Unset outside the benchmark, so
+# LiveKit's defaults apply.
+ENDPOINTING: dict = {}
+if min_s := os.getenv("ENDPOINT_MIN_S", "1.5" if BENCHMARK_MODE else ""):
+    ENDPOINTING["min_delay"] = float(min_s)
+if max_s := os.getenv("ENDPOINT_MAX_S", "6.0" if BENCHMARK_MODE else ""):
+    ENDPOINTING["max_delay"] = float(max_s)
+
 # Minimum user speech (s) that interrupts the agent. Lower catches short or
 # quiet barge-ins; LiveKit resumes speech on false interruptions.
 INTERRUPT_MIN_S = float(os.getenv("INTERRUPT_MIN_S", "0.3"))
@@ -126,7 +143,9 @@ INSTRUCTIONS = (
     "mentioned as fact; act on the latest request instead. If a tool returns "
     "status 'already_completed', the action was not repeated; say it was "
     "already done. Never claim an action is complete before its tool succeeded. "
-    # VisionGuide
+)
+
+VISION_INSTRUCTIONS = (
     "You are also VisionGuide, an experimental camera assistant for blind and "
     "visually impaired users. Never guess what the camera sees; only state what "
     "a tool returned. Tools: get_current_scene for what is ahead or around, "
@@ -159,6 +178,8 @@ INSTRUCTIONS = (
     "Tool arguments such as city names stay in English whatever language the "
     "user speaks. VisionGuide also announces obstacles on its own between turns."
 )
+if not BENCHMARK_MODE:
+    INSTRUCTIONS += VISION_INSTRUCTIONS
 
 
 def read_scene_file() -> dict:
@@ -212,6 +233,9 @@ def compact_scene(scene: dict) -> dict:
 def build_registry(vc: VisionContext) -> ToolRegistry:
     injector = LatencyInjector(profile=os.getenv("MOCK_LATENCY_PROFILE", "instant"))
     registry = register_mock_apis(ToolRegistry(), injector)
+    if BENCHMARK_MODE:
+        # Camera tools would only be unexpected calls in the benchmark.
+        return _load_extra_tools(registry)
     registry.register(
         ToolSpec(
             name="get_current_scene",
@@ -227,6 +251,10 @@ def build_registry(vc: VisionContext) -> ToolRegistry:
         )
     )
     register_vision_tools(registry, vc)
+    return _load_extra_tools(registry)
+
+
+def _load_extra_tools(registry: ToolRegistry) -> ToolRegistry:
     # Unseen tools can be supplied at runtime as JSON schemas.
     if extra := os.getenv("EXTRA_TOOLS_FILE"):
         logger.info("loaded extra tools: %s", registry.load_json(extra))
@@ -328,7 +356,9 @@ class VoiceAgent(Agent):
             extra: list[llm.ChatItem] = [
                 llm.ChatMessage(role="system", content=[note]) for note in notes
             ]
-            if _DETAIL_QUESTION.search(text):
+            if BENCHMARK_MODE:
+                pass  # no camera: never force or prefetch vision tools
+            elif _DETAIL_QUESTION.search(text):
                 # The detector's object list can't read text or see colours:
                 # make this call go to the vision-language model.
                 model_settings = dataclasses.replace(
@@ -368,7 +398,7 @@ class VoiceAgent(Agent):
 
 
 def make_vision_bridge() -> VisionBridge | None:
-    if VISION_MODE == "off":
+    if VISION_MODE == "off" or BENCHMARK_MODE:
         return None
     if VISION_MODE == "livekit" and importlib.util.find_spec("ultralytics") is None:
         logger.warning("VisionGuide disabled: install it with `uv sync --extra vision`")
@@ -433,7 +463,7 @@ async def entrypoint(ctx: JobContext) -> None:
         stt_kwargs["extra_kwargs"] = {"keyterm": STT_KEYTERMS}
     session = AgentSession(
         stt=inference.STT(model="deepgram/nova-3", language=STT_LANGUAGE, **stt_kwargs),
-        llm=inference.LLM(model="openai/gpt-4o-mini"),
+        llm=inference.LLM(model=LLM_MODEL),
         tts=inference.TTS(model="cartesia/sonic-3"),
         vad=ctx.proc.userdata["vad"],
         turn_handling={
@@ -443,6 +473,7 @@ async def entrypoint(ctx: JobContext) -> None:
             "interruption": {"min_duration": INTERRUPT_MIN_S},
             # Start the LLM on the partial transcript before the turn ends.
             "preemptive_generation": {"enabled": True},
+            **({"endpointing": ENDPOINTING} if ENDPOINTING else {}),
         },
     )
     vc.session = session
@@ -540,8 +571,10 @@ async def entrypoint(ctx: JobContext) -> None:
         agent=VoiceAgent(coordinator),
         room=ctx.room,
         room_options=room_io.RoomOptions(
+            # Noise cancellation is for live microphones; the benchmark's
+            # recorded audio is clean and BVC can clip its quiet fillers.
             audio_input=room_io.AudioInputOptions(
-                noise_cancellation=noise_cancellation.BVC(),
+                noise_cancellation=None if BENCHMARK_MODE else noise_cancellation.BVC(),
             ),
         ),
     )
@@ -558,7 +591,9 @@ async def entrypoint(ctx: JobContext) -> None:
             for pub in participant.track_publications.values():
                 if pub.track is not None:
                     maybe_attach(pub.track, pub)
-    await session.say("Hello! I'm ready to assist you.")
+    if not BENCHMARK_MODE:
+        # In the benchmark the user is already talking when the agent joins.
+        await session.say("Hello! I'm ready to assist you.")
 
 
 if __name__ == "__main__":

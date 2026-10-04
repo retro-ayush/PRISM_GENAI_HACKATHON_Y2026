@@ -591,6 +591,9 @@ Optional settings:
 | `VISION_ALERT_TONE` | `1` | Two-tone alert before urgent warnings |
 | `VLM_MODEL` | `openai/gpt-4o-mini` | Vision-language model behind `describe_view` (any LiveKit Inference model that accepts images) |
 | `STT_LANGUAGE` | `en` | Deepgram language; `multi` understands English/Hindi code-switching (keyterm boosting is English-only) |
+| `BENCHMARK_MODE` | `0` | `1` for Full-Duplex-Bench runs: no greeting, no VisionGuide or noise cancellation, `gpt-4o`, longer end-of-turn wait |
+| `LLM_MODEL` | `openai/gpt-4o-mini` (`openai/gpt-4o` in benchmark mode) | LiveKit Inference LLM used for conversation and tool calls |
+| `ENDPOINT_MIN_S` / `ENDPOINT_MAX_S` | LiveKit default (`1.5` / `6.0` in benchmark mode) | Silence before a turn ends when the user sounds finished / mid-sentence |
 
 ---
 

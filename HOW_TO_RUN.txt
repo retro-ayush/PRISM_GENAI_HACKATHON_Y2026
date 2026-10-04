@@ -166,10 +166,14 @@ STEP 11 - Configure the harness (one time)
 STEP 12 - Run the benchmark (two terminals)
   TERMINAL 1 - start the agent, from the project folder:
     rm -f /tmp/agent_tool_calls.log
-    uv run src/agent.py start
+    BENCHMARK_MODE=1 uv run src/agent.py start
   Leave it running. Check that .env has AGENT_NAME= (empty), and that no
   other agent on the same LiveKit project (e.g. one deployed to LiveKit
-  Cloud) is also joining rooms.
+  Cloud, or a "dev"/"console" agent left running) is also joining rooms:
+    pkill -f "src/agent.py"      stops every local agent first
+  BENCHMARK_MODE=1 turns off the greeting, VisionGuide and noise
+  cancellation, uses gpt-4o, and waits longer (1.5-6 s) before ending a
+  turn, so the agent hears the whole disfluent recording.
 
   TERMINAL 2 - run the 100 samples, from Full-Duplex-Bench/v3:
     .venv/bin/python run_tool_benchmark_all_released.py --provider interruptible

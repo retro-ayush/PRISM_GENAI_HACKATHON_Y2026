@@ -6,6 +6,8 @@ This project is a LiveKit-based Python voice agent built for **Full-Duplex-Bench
 
 It also includes **VisionGuide**, an end-to-end voice + vision extension that lets the agent query the user's current surroundings through a camera pipeline.
 
+**▶ [Watch the demo video on YouTube](https://youtu.be/BK-_v1iJLoA)**
+
 ---
 
 ## Table of Contents
@@ -876,10 +878,11 @@ interruptible-agent/
 ├── scenarios.yaml            # Conversation scenarios
 │
 ├── pyproject.toml            # Python project configuration
+├── uv.lock                   # Locked dependency versions
+├── requirements.txt          # Same pins for pip (generated from uv.lock)
 ├── Dockerfile                # Voice-agent container
 ├── .env.example              # Environment template
 ├── LICENSE
-├── interruptible_agent.mp4   # Demo video
 └── README.md
 ```
 
@@ -896,7 +899,7 @@ The repository keeps the main pieces needed to reproduce the project:
 - Configuration templates
 - Docker configuration
 - Evaluation resources
-- Demo video
+- Demo video ([YouTube](https://youtu.be/BK-_v1iJLoA))
 
 For a clean reproduction, follow [Installation](#installation), [Configuration](#configuration--api-keys) and [Reproducing the Benchmark](#reproducing-the-benchmark) in order. What makes a run comparable to ours:
 
@@ -944,7 +947,9 @@ A five-minute walk-through that shows every part of the system:
 
 ### Full Demo
 
-[**▶ Watch `interruptible_agent.mp4`**](./interruptible_agent.mp4)
+[![Team Code4Fun: Vision Empowered Interruptible AI Agent (click to watch on YouTube)](https://img.youtube.com/vi/BK-_v1iJLoA/0.jpg)](https://youtu.be/BK-_v1iJLoA)
+
+[**▶ Watch the demo on YouTube**](https://youtu.be/BK-_v1iJLoA)
 
 The demo covers the voice interaction, interruption behaviour, tool usage, and the extended VisionGuide use case.
 

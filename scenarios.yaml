@@ -1,0 +1,208 @@
+# Simulation scenarios for the interruptible agent. Each one is a conversation a
+# simulated user has with the agent, judged against agent_expectations. Run them
+# with `lk agent simulate text --scenarios scenarios.yaml`; the Simulations
+# workflow runs them on every merge to main.
+#
+# Coordinator-level guarantees (stale results, idempotency, cancellation) are
+# covered deterministically by tests/test_coordinator.py; these scenarios check
+# the LLM's conversational behavior on top of them. Pin dates to absolute values.
+name: Interruptible agent
+scenarios:
+  - label: Searches flights with a tool
+    instructions: |
+      PERSONA: A traveller planning a trip.
+      OPENING LINE: "Can you find me flights to Delhi on October 2nd, 2026?"
+      DO, IN ORDER:
+      1. After the assistant answers, say thanks and end the conversation.
+    agent_expectations: >
+      Calls search_flights for Delhi on 2026-10-02 and reports the flight and
+      price from the tool result without inventing other flights. Replies are
+      brief spoken prose with no lists or markdown.
+    tags:
+      feature: tools
+
+  - label: Self-correction replaces the destination
+    instructions: |
+      PERSONA: A traveller who changes their mind mid-request.
+      OPENING LINE: "Find flights from Chennai to Delhi on October 2nd, 2026. Wait, actually, make it Mumbai."
+      DO, IN ORDER:
+      1. After the assistant answers, ask: "Which city did you search for?"
+      2. Say thanks and end the conversation.
+    agent_expectations: >
+      Treats Mumbai as the destination. Searches flights to Mumbai, does not
+      present Delhi results as the answer, and confirms Mumbai when asked.
+    tags:
+      feature: interruption
+
+  - label: Cancelled booking is not performed
+    instructions: |
+      PERSONA: A traveller who decides not to book after all.
+      OPENING LINE: "Search flights to Goa on October 2nd, 2026."
+      DO, IN ORDER:
+      1. After the assistant lists a flight, say: "Book it for Priya Sharma... no wait, don't book it. Just tell me the price again."
+      2. After it answers, ask: "So nothing was booked, right?"
+      3. End the conversation.
+    agent_expectations: >
+      Never calls book_flight. Repeats the price from the search result and
+      confirms that nothing was booked.
+    tags:
+      feature: interruption
+
+  - label: Does not repeat a completed booking
+    instructions: |
+      PERSONA: A forgetful traveller.
+      OPENING LINE: "Find flights to Pune on October 2nd, 2026."
+      DO, IN ORDER:
+      1. After the assistant lists a flight, say: "Book it for Priya Sharma."
+      2. After it confirms the booking, say: "Please book that same flight for Priya Sharma."
+      3. End the conversation.
+    agent_expectations: >
+      Books the flight once and gives the booking reference. On the repeat
+      request, says the booking already exists rather than claiming a second
+      new booking.
+    tags:
+      feature: idempotency
+
+  - label: Ambiguous correction gets a clarifying question
+    instructions: |
+      PERSONA: A vague user.
+      OPENING LINE: "Find flights to Delhi on October 2nd, 2026."
+      DO, IN ORDER:
+      1. After the assistant answers, say: "Actually, change it."
+      2. If it asks what to change, say: "The date, make it October 5th, 2026." then end the conversation.
+    agent_expectations: >
+      Asks which detail to change instead of guessing, then searches flights
+      to Delhi on 2026-10-05.
+    tags:
+      feature: clarification
+
+  - label: Vision question uses the camera tool
+    instructions: |
+      PERSONA: A user relying on VisionGuide.
+      OPENING LINE: "What's in front of me right now?"
+      DO, IN ORDER:
+      1. After the assistant answers, end the conversation.
+    agent_expectations: >
+      Does not guess what the camera sees. The camera scene is fetched
+      automatically for vision questions; when it reports the camera is not
+      running, says so plainly instead of describing a scene.
+    tags:
+      feature: vision
+
+  - label: Chains apartment search into a commute calculation
+    instructions: |
+      PERSONA: A renter moving to Bangalore.
+      OPENING LINE: "Find me an apartment in Bangalore under 30000 rupees, and tell me the commute from it to Whitefield."
+      DO, IN ORDER:
+      1. After the assistant answers, say thanks and end the conversation.
+    agent_expectations: >
+      Calls search_apartments for Bangalore with a maximum price of 30000, then
+      calls calculate_commute from the apartment it found to Whitefield, and
+      reports both the apartment price and the commute time from the tool
+      results.
+    tags:
+      feature: tool_chain
+
+  - label: Date self-correction keeps the rest of the request
+    instructions: |
+      PERSONA: A traveller who misspeaks the date.
+      OPENING LINE: "Find flights from Pune to Goa on October 5th, 2026. No sorry, October 6th."
+      DO, IN ORDER:
+      1. After the assistant answers, end the conversation.
+    agent_expectations: >
+      Searches flights from Pune to Goa on 2026-10-06. Does not search or
+      report results for 2026-10-05 and does not swap origin and destination.
+    tags:
+      feature: interruption
+
+  - label: Vision never invents what it cannot see
+    instructions: |
+      PERSONA: A visually impaired user relying on VisionGuide.
+      OPENING LINE: "Is anything behind me?"
+      DO, IN ORDER:
+      1. After the assistant answers, end the conversation.
+    agent_expectations: >
+      Does not describe objects behind the user. Explains that the camera only
+      sees what is in front, or that the camera is not available, without
+      claiming the area is safe or clear.
+    tags:
+      feature: vision
+
+  - label: Direction question without a camera does not invent a route
+    instructions: |
+      PERSONA: A blind user walking indoors.
+      OPENING LINE: "Should I go left or right to get around what's in front of me?"
+      DO, IN ORDER:
+      1. After the assistant answers, end the conversation.
+    agent_expectations: >
+      The camera scene is fetched automatically for direction questions, so no
+      visible tool call is expected; in this test the camera is not running.
+      Explains that it cannot currently see and does not recommend a
+      direction, claim the path is clear, or describe obstacles.
+    tags:
+      feature: vision
+
+  - label: Finding an object without a camera is honest
+    instructions: |
+      PERSONA: A blind user who misplaced their phone.
+      OPENING LINE: "Where is my phone?"
+      DO, IN ORDER:
+      1. After the assistant answers, end the conversation.
+    agent_expectations: >
+      Calls find_object for the phone. Because the camera is not running, it
+      says it cannot see right now and does not invent a location.
+    tags:
+      feature: vision
+
+  - label: Quiet mode request changes guidance settings
+    instructions: |
+      PERSONA: A user who finds the automatic warnings too chatty.
+      OPENING LINE: "Please be quiet and only warn me about real dangers."
+      DO, IN ORDER:
+      1. After the assistant confirms, end the conversation.
+    agent_expectations: >
+      Calls set_guidance_mode with mode quiet and confirms in one short
+      sentence that only urgent warnings will be spoken.
+    tags:
+      feature: vision
+
+  - label: Guide-to without a camera does not give directions
+    instructions: |
+      PERSONA: A blind user indoors.
+      OPENING LINE: "Guide me to the chair."
+      DO, IN ORDER:
+      1. After the assistant answers, say: "Okay, stop guidance."
+      2. End the conversation.
+    agent_expectations: >
+      Calls guide_to for the chair. As the camera is not running it says it
+      cannot see and gives no direction. On the second turn it calls
+      stop_guidance (or says no guidance is active) without inventing anything.
+    tags:
+      feature: vision
+
+  - label: Reading text uses the vision model, never invents text
+    instructions: |
+      PERSONA: A blind user standing in front of a sign.
+      OPENING LINE: "Can you read the sign in front of me?"
+      DO, IN ORDER:
+      1. After the assistant answers, end the conversation.
+    agent_expectations: >
+      Calls describe_view (or reports the camera is unavailable). Since no
+      live frame exists, it says it cannot see the sign right now and does not
+      make up any text.
+    tags:
+      feature: vision
+
+  - label: Switching to Hindi
+    instructions: |
+      PERSONA: A Hindi speaker.
+      OPENING LINE: "Can you speak in Hindi from now on?"
+      DO, IN ORDER:
+      1. After the assistant replies, ask in Hindi: "मुंबई के लिए 2 अक्टूबर 2026 की फ्लाइट ढूंढो"
+      2. End the conversation.
+    agent_expectations: >
+      Calls set_language with Hindi and from then on replies in Hindi. On the
+      second turn it calls search_flights for Mumbai on 2026-10-02 and reports
+      the result in Hindi.
+    tags:
+      feature: language

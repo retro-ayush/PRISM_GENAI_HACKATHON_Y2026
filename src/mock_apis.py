@@ -8,10 +8,11 @@ re-check the user's intent between the delay and the commit of a mutation.
 from __future__ import annotations
 
 import itertools
+import re
 from typing import Any
 
 from latency_injector import LatencyInjector
-from tool_registry import ToolRegistry, ToolSpec
+from tool_registry import ToolRegistry, ToolSpec, ToolValidationError
 
 _booking_ids = itertools.count(1)
 
@@ -79,12 +80,23 @@ def modify_autopay(bill_type: str, source_account: str) -> dict:
 
 
 # ── Housing & Location ──────────────────────────────────────────
-def search_apartments(city: str, bedrooms: int, max_price: float) -> dict:
-    return {
-        "status": "success",
-        "city": city,
-        "results": [{"id": "APT1", "price": max_price - 100, "beds": bedrooms}],
+def search_apartments(
+    city: str | None = None,
+    bedrooms: int | None = None,
+    max_price: float | None = None,
+    pets_allowed: bool | None = None,
+) -> dict:
+    # Every filter is optional: the user may give only some of them, and the
+    # LLM must not have to invent the rest.
+    apartment = {
+        "id": "APT1",
+        "address": f"12 Oak Street, {city}" if city else "12 Oak Street",
+        "price": max_price - 100 if max_price else 1450.0,
+        "beds": bedrooms if bedrooms is not None else 1,
     }
+    if pets_allowed is not None:
+        apartment["pets_allowed"] = pets_allowed
+    return {"status": "success", "city": city, "results": [apartment]}
 
 
 def calculate_commute(
@@ -93,8 +105,101 @@ def calculate_commute(
     return {"status": "success", "duration_mins": 25, "mode": mode}
 
 
-def update_search_filter(filter_name: str, value: str) -> dict:
+def update_search_filter(filter_name: str, value: Any) -> dict:
     return {"status": "success", "filter_updated": filter_name, "new_value": value}
+
+
+# Housing argument normalisation: spoken values arrive as "$1,800", "3" or
+# "yes"; turn them into the types the API expects, or reject them with a
+# message the LLM can correct.
+_AMOUNT = re.compile(
+    r"[$₹€£]?\s*(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?\s*"
+    r"(?:dollars?|usd|rupees?|inr|euros?|pounds?)?\s*"
+    r"(?:per month|a month|/\s*month|monthly)?",
+    re.I,
+)
+
+
+def _price(field: str, value: Any) -> float | int:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = value
+    elif isinstance(value, str) and (m := _AMOUNT.fullmatch(value.strip())):
+        number = float(m.group(1).replace(",", "") + (m.group(2) or ""))
+    else:
+        raise ToolValidationError(
+            f"{field} must be a plain number such as 1800 (for '$1,800'); got {value!r}"
+        )
+    if number <= 0:
+        raise ToolValidationError(f"{field} must be greater than 0; got {value!r}")
+    return int(number) if float(number).is_integer() else number
+
+
+def _count(field: str, value: Any) -> int:
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ToolValidationError(
+            f"{field} must be a whole number of bedrooms such as 2; got {value!r}"
+        )
+    return value
+
+
+def _flag(field: str, value: Any) -> bool:
+    if isinstance(value, str) and value.strip().lower() in ("true", "yes"):
+        return True
+    if isinstance(value, str) and value.strip().lower() in ("false", "no"):
+        return False
+    if not isinstance(value, bool):
+        raise ToolValidationError(f"{field} must be true or false; got {value!r}")
+    return value
+
+
+def _text(field: str, value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ToolValidationError(f"{field} must be a non-empty name; got {value!r}")
+    return value.strip()
+
+
+_SEARCH_FIELDS = {
+    "city": _text,
+    "bedrooms": _count,
+    "max_price": _price,
+    "pets_allowed": _flag,
+}
+_FILTERS = {
+    "neighborhood": _text,
+    "min_bedrooms": _count,
+    "max_price": _price,
+    "pets_allowed": _flag,
+}
+
+
+def _prepare_search(args: dict[str, Any]) -> dict[str, Any]:
+    unknown = sorted(
+        k for k, v in args.items() if k not in _SEARCH_FIELDS and v is not None
+    )
+    if unknown:
+        raise ToolValidationError(
+            f"unknown argument(s) {unknown}; search_apartments accepts only "
+            f"{list(_SEARCH_FIELDS)}"
+        )
+    return {k: _SEARCH_FIELDS[k](k, v) for k, v in args.items() if v is not None}
+
+
+def _prepare_filter(args: dict[str, Any]) -> dict[str, Any]:
+    name = args.get("filter_name")
+    if name not in _FILTERS:
+        raise ToolValidationError(
+            f"filter_name must be one of {list(_FILTERS)}; got {name!r}"
+        )
+    if args.get("value") is None:
+        raise ToolValidationError(f"value is required for filter {name!r}")
+    return {
+        "filter_name": name,
+        "value": _FILTERS[name](f"value for {name}", args["value"]),
+    }
 
 
 # ── E-Commerce Support ──────────────────────────────────────────
@@ -195,17 +300,35 @@ _SPECS: list[tuple[Any, str, str, dict[str, Any]]] = [
     (
         search_apartments,
         "read_only",
-        "Search rental apartments in a city by bedroom count and maximum price.",
+        "Search rental apartments. Every filter is optional: pass only what the "
+        "user actually said and omit the rest. Never invent a city, bedroom "
+        "count, budget or pet requirement, and search right away instead of "
+        "asking for filters the user didn't give (a search without a city is "
+        "fine).",
         _obj(
-            {"city": _STR, "bedrooms": _INT, "max_price": _NUM},
-            ["city", "bedrooms", "max_price"],
+            {
+                "city": {**_STR, "description": "City the user named"},
+                "bedrooms": {**_INT, "description": "Number of bedrooms"},
+                "max_price": {
+                    **_NUM,
+                    "description": "Maximum monthly rent as a plain number, "
+                    "e.g. 1800 for '$1,800' or 'eighteen hundred'",
+                },
+                "pets_allowed": {
+                    "type": "boolean",
+                    "description": "true only if the user needs a pet-friendly place",
+                },
+            },
+            [],
         ),
     ),
     (
         calculate_commute,
         "read_only",
         "Calculate the commute time between two addresses. Always use this "
-        "instead of estimating.",
+        "instead of estimating. A place name is a valid address: pass it as the "
+        "user said it (e.g. 'Downtown Office', 'my office', 'the train station') "
+        "instead of asking for a street address.",
         _obj(
             {
                 "origin_address": _STR,
@@ -222,8 +345,25 @@ _SPECS: list[tuple[Any, str, str, dict[str, Any]]] = [
     (
         update_search_filter,
         "state_modifying",
-        "Update one of the user's saved search filters (e.g. budget, bedrooms).",
-        _obj({"filter_name": _STR, "value": _STR}, ["filter_name", "value"]),
+        "Update one of the user's saved apartment-search filters. Call it once "
+        "per filter that changes.",
+        _obj(
+            {
+                "filter_name": {
+                    **_STR,
+                    "enum": list(_FILTERS),
+                    "description": "neighborhood: area name; min_bedrooms: "
+                    "minimum bedrooms; max_price: maximum monthly rent; "
+                    "pets_allowed: pet-friendly only",
+                },
+                "value": {
+                    "type": ["number", "boolean", "string"],
+                    "description": "A number for max_price and min_bedrooms "
+                    "(1800, 3), true/false for pets_allowed, text for neighborhood",
+                },
+            },
+            ["filter_name", "value"],
+        ),
     ),
     (
         track_order,
@@ -251,6 +391,12 @@ _SPECS: list[tuple[Any, str, str, dict[str, Any]]] = [
 ]
 
 
+_PREPARE = {
+    "search_apartments": _prepare_search,
+    "update_search_filter": _prepare_filter,
+}
+
+
 def register_mock_apis(
     registry: ToolRegistry, injector: LatencyInjector | None = None
 ) -> ToolRegistry:
@@ -263,6 +409,7 @@ def register_mock_apis(
                 parameters=parameters,
                 handler=handler,
                 latency=injector.inject if injector else None,
+                prepare=_PREPARE.get(handler.__name__),
             )
         )
     return registry

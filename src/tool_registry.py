@@ -46,6 +46,10 @@ class ToolSpec:
     # mutations, the coordinator re-checks intent after this and before commit.
     latency: Callable[[str], Awaitable[Any]] | None = None
     tags: list[str] = field(default_factory=list)
+    # Optional tool-specific normalisation of the raw arguments (e.g. "$1,800"
+    # -> 1800), run before the schema check. Raises ToolValidationError with a
+    # message the LLM can act on.
+    prepare: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     @property
     def mutating(self) -> bool:
@@ -60,6 +64,8 @@ class ToolSpec:
 
     def validate(self, args: dict[str, Any]) -> dict[str, Any]:
         """Check args against the schema; drop unknown keys and fill defaults."""
+        if self.prepare is not None:
+            args = self.prepare(dict(args))
         props: dict[str, Any] = self.parameters.get("properties", {})
         required: list[str] = self.parameters.get("required", [])
         missing = [p for p in required if args.get(p) is None]

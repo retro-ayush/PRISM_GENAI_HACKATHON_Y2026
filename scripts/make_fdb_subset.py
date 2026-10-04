@@ -2,7 +2,8 @@
 
 12 scenarios per domain (one recording each), spread across easy / medium /
 hard. Selection is seeded, so every machine gets the same 48 samples. The
-subset folders link to the released audio instead of copying it.
+subset folders link to the released audio (or copy it where symlinks aren't
+allowed, e.g. Windows without Developer Mode).
 
 Run from Full-Duplex-Bench/v3 (after downloading fdb_v3_data_released/):
 
@@ -14,6 +15,7 @@ import collections
 import json
 import os
 import random
+import shutil
 from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -55,6 +57,10 @@ for _tier, _example_id, folder in chosen:
     out.mkdir(exist_ok=True)
     for name in ("input.wav", "metadata.json"):
         if not (out / name).exists():
-            os.symlink((folder / name).resolve(), out / name)
+            try:
+                os.symlink((folder / name).resolve(), out / name)
+            except OSError:
+                # Windows without Developer Mode can't create symlinks.
+                shutil.copy2(folder / name, out / name)
 
 print(f"{len(chosen)} samples in {dst}/")

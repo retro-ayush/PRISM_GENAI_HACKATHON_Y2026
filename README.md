@@ -1,5 +1,5 @@
 # Vision: Interruptible Agent — Full-Duplex Voice Assistant
-
+ 
 **A full-duplex voice agent that can listen, respond, get interrupted, recover from stale intent, and safely execute actions.**
 
 This project is a LiveKit-based Python voice agent built for **Full-Duplex-Bench v3**. The main focus is not just getting a voice response out quickly, but handling the messy parts of real conversations: interruptions, corrections, tool calls, and actions that may already be in progress.
